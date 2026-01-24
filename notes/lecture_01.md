@@ -1,6 +1,10 @@
-# lecture 01: Overview, tokenization
+# lecture 01: Overview, tokenization{ignore true}
 
 本节课主要是简单介绍了这门课程的教学内容和LLM的一些概述
+
+## 目录{ignore true}
+
+[toc]
 
 ## 1 Overview
 
