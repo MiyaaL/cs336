@@ -111,5 +111,78 @@ PP的好处是：
     - B-pass (Backward for activations)：计算并传递用于激活的梯度（即中间结果的梯度）。这部分依赖于下游阶段的 B-pass。
     - W-pass (Backward for weights)：计算模型参数（权重）本身的梯度。这部分只依赖于本阶段的前向结果和 B-pass 的输出，可以更早地执行。
 
+> 关于PP，课程介绍的并不详细，可以参考：
+> https://www.cnblogs.com/rossiXYZ/p/15272831.html
+> https://zhuanlan.zhihu.com/p/670301574
+
+这里也分别总结如下：
+
+##### 2.2.1.1 朴素PP
+
+![lecture_07_8](../images/lecture_07/lecture_07_8.png)
+
+- 就是简单的流水线，里面空泡很多。
+- 里面分为4个stage，可以认为将模型的层数切分为了4个部分，也就是PP=4
+- 每个Forward Work/Backward Work操作的小块称为mini-batch
+
+##### 2.2.1.2 Gpipe PP
+
+![lecture_07_9](../images/lecture_07/lecture_07_9.png)
+
+- **Gpipe**论文使用的PP方式，也称为**F-then-B PP**
+- 空泡数量相对朴素PP减少很多
+- 将上述朴素PP的mini-batch再切了一刀，1~4(横向的)称为micro-batch(仍然叫mini-batch也可以，没区别)
+- 每台设备要缓存多个mini-batch的中间变量和梯度，显存占用量仍然较高
+
+##### 2.2.1.3 1F1B PP
+
+![lecture_07_10](../images/lecture_07/lecture_07_10.png)
+
+- **PipeDream**论文的并行方式
+- 上图包含初始和稳定阶段，它的排列规律只要记好每次**Backward Work**开始，都需要尽快结束即可
+- 1F1B有个问题是梯度更新问题比较麻烦，假设关注mini-batch 5，那么5的F是在mini-batch 1的B更新完毕参数后计算的（参数$\theta_1$），5的B则是在2、3、4的B之后再次更新一轮参数后计算的（参数$\theta_{1,2,3,4}$）。这就会导致mini-batch 5 F和B使用的参数版本不一致（$\theta_1 \neq \theta_{1,2,3,4}$）
+- 为了解决参数版本问题，1F1B要做**Weight stashing**（为权重维护多个版本）以及**Vertical Sync**（权重版本强制对齐，默认不启用）
+- **1F1B**相比**F-then-B**来说，显存的利用率是提升了的，因为对每个mini-batch来说，Forward和Backward之间的距离是缩短了的（Backward之后就可以及时释放梯度和中间变量了）
+
+##### 2.2.1.4 Zero bubble PP
+
+![lecture_07_11](../images/lecture_07/lecture_07_11.png)
+
+- 上图中的1F1B中的Backward故意画长了一格，是因为一般Backward的计算耗时差不多就是Forward的两倍
+- 基于**1F1B**重新设计，将Backward做了拆分，分为对weights（用W表示）和对activations（用B表示）的Backward两部分：
+$$
+\begin{align}
+    B: \; &\frac{\partial L}{\partial x} = W^T \cdot \frac{\partial L}{\partial y} \\
+    W: \; &\frac{\partial L}{\partial W} = \frac{\partial L}{\partial y} \cdot x^T \\
+    \frac{\partial L}{\partial y}: \; &上一层梯度
+\end{align}
+$$
+    其中W的计算是不需要在PP每个设备间进行传递的，所以完全可以滞后计算，填充到F和B排布后的气泡中。
+- 文章给出了**ZB-H1**、**ZB-H2**两种W的填充方式，各有优势：
+    - **ZB-H1**：气泡大小减少到 1F1B 大小的三分之一，收益在于所有worker更早地启动B，并且尾端的气泡被较晚启动的W阶段填补。由于W通常比B使用更少的内存。
+    - **ZB-H2**：在warmup阶段引入更多的前向F来填补第一个反向B之前的气泡，另外在最后cooldown阶段重新排序W以填补所有气泡，最终实现几乎零气泡调度。
+
 #### 2.2.2 Tensor parallel (+ Sequence parallel)
 
+- 核心idea：对计算过程中的矩阵进行拆分，分在多张卡上并行计算。
+
+- 优点：
+    - 没有气泡
+    - 单batch也可以并行
+- 缺点：
+    - 通信成本高，需要all-reduce
+
+#### 2.2.3 sequence parallel
+
+- 核心idea：activation本身的显存占用量非常大，且与序列长度成正比，因此在序列长度方向进行切分，可以带来收益
+
+![lecture_07_12](../images/lecture_07/lecture_07_12.png)
+![lecture_07_13](../images/lecture_07/lecture_07_13.png)
+
+#### 2.2.4 总结
+
+![lecture_07_14](../images/lecture_07/lecture_07_14.png)
+
+### 2.3 总结
+
+现在很多大模型都是DP+TP+PP混合的，TP=8一般就是最优的（单节点8卡机器）
